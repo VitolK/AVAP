@@ -33,6 +33,8 @@ IMAGE_EXTENSIONS = {
 }
 
 RANDOM_TOKEN = "__RANDOM_IMAGE__"
+# Inline tools: terminal-based image viewers (chafa, viu, etc.) that display images in terminal
+# Install with: sudo apt install chafa (or brew install chafa on macOS)
 INLINE_TOOLS: Sequence[Sequence[str]] = (
     ("chafa", "--format=kitty"),
     ("chafa", "--format=sixels"),
@@ -68,16 +70,37 @@ def is_wsl() -> bool:
 
 
 def wsl_to_windows_path(path: Path) -> str:
-    """Convert /mnt/c/... to C:\\..."""
-    parts = path.as_posix()
+    """Convert WSL path to Windows path. Uses wslpath if available, otherwise manual conversion."""
+    abs_path = path.resolve()
+    path_str = str(abs_path)
+    
+    # Try wslpath first (most reliable)
+    if command_exists("wslpath"):
+        try:
+            result = subprocess.run(
+                ["wslpath", "-w", path_str],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+    
+    # Manual conversion: /mnt/c/... to C:\...
+    parts = abs_path.as_posix()
     prefix = "/mnt/"
     if parts.startswith(prefix) and len(parts) > len(prefix) + 2:
         drive = parts[len(prefix)]
-        rest = parts[len(prefix) + 2 :]
+        rest = parts[len(prefix) + 2:]
         # Can't use backslashes directly in f-string expressions, so do replacement first
         win_rest = rest.replace('/', '\\')
         return f"{drive.upper()}:\\{win_rest}"
-    return str(path)
+    
+    # If path doesn't start with /mnt/, it might be a Linux path
+    # Try to use wslview or xdg-open instead
+    return path_str
 
 
 def list_images(directory: Path) -> List[Path]:
@@ -115,7 +138,7 @@ def pick_with_fzf(images: List[Path]) -> Optional[Path]:
 def fallback_menu(images: List[Path]) -> Optional[Path]:
     """Simple numbered menu fallback."""
     while True:
-        print("\n=== Picture Viewer ===")
+        print("\n=== Nimhirdykla ===")
         print("0) 🎲 RANDOM IMAGE")
         for idx, img in enumerate(images, start=1):
             print(f"{idx}) {img.name}")
@@ -181,30 +204,70 @@ def display_inline(path: Path, preferred: Optional[str] = None) -> bool:
 
 
 def open_or_display(path: Path, inline: bool, inline_preferred: Optional[str]) -> None:
-    if inline:
+    """
+    Try to display image. By default tries inline first, then falls back to external viewer.
+    If --no-inline flag is used, skips inline and goes straight to external viewer.
+    """
+    # Always try inline first (unless explicitly disabled)
+    if inline or inline_preferred is not None:
+        # User explicitly requested inline
         if display_inline(path, inline_preferred):
             return
-        print("Inline tools not found, falling back to external viewer...")
+        # Inline failed, continue to external viewer silently
+    else:
+        # Default: try inline first, then fall back
+        if display_inline(path, None):
+            return
+        # Inline failed, continue to external viewer silently
+    
+    # Fall back to external viewer
     open_image(path)
 
 
 def open_image_wsl(path: Path) -> None:
+    """Open image in WSL - tries multiple methods."""
     abs_path = path.resolve()
-    win_path = wsl_to_windows_path(abs_path)
-
-    if command_exists("cmd.exe"):
-        subprocess.run(["cmd.exe", "/c", "start", "", win_path])
-        return
-    if command_exists("explorer.exe"):
-        subprocess.run(["explorer.exe", win_path])
-        return
+    path_str = str(abs_path)
+    
+    # Try wslview first (best for WSL)
     if command_exists("wslview"):
-        subprocess.run(["wslview", str(abs_path)])
-        return
+        try:
+            subprocess.run(["wslview", path_str], check=False, timeout=5)
+            return
+        except Exception:
+            pass
+    
+    # Try wslpath + Windows commands
+    win_path = wsl_to_windows_path(abs_path)
+    
+    # Only use Windows commands if path conversion succeeded and looks like Windows path
+    if win_path and (win_path.startswith(("C:", "D:", "E:", "F:")) or "\\" in win_path):
+        # Try explorer.exe (most reliable on Windows)
+        if command_exists("explorer.exe"):
+            try:
+                # Use quotes to handle paths with spaces
+                subprocess.run(["explorer.exe", win_path], check=False, timeout=5)
+                return
+            except Exception:
+                pass
+        
+        # Try cmd.exe start as fallback
+        if command_exists("cmd.exe"):
+            try:
+                subprocess.run(["cmd.exe", "/c", "start", "", win_path], check=False, timeout=5)
+                return
+            except Exception:
+                pass
+    
+    # Fallback to xdg-open (Linux viewer)
     if command_exists("xdg-open"):
-        subprocess.run(["xdg-open", str(abs_path)])
-        return
-    print("Error: Unable to open image (WSL). Install wslu or ensure Windows shell available.")
+        try:
+            subprocess.run(["xdg-open", path_str], check=False, timeout=5)
+            return
+        except Exception:
+            pass
+    
+    print("Error: Unable to open image (WSL). Try installing wslu (wslview) or ensure Windows shell available.")
 
 
 def open_image_windows(path: Path) -> None:
@@ -241,14 +304,14 @@ def parse_args() -> argparse.Namespace:
         help="Folder that contains images (default: current directory)",
     )
     parser.add_argument(
-        "--inline",
+        "--no-inline",
         action="store_true",
-        help="Try to display images inside the terminal using chafa/viu/tycat/etc.",
+        help="Skip inline terminal display and use external viewer only.",
     )
     parser.add_argument(
         "--inline-tool",
         help="Force a specific inline tool (e.g. chafa, viu, imgcat). "
-        "Falls back to auto-detection if missing.",
+        "Falls back to auto-detection if missing. Implies --inline.",
     )
     return parser.parse_args()
 
@@ -273,8 +336,10 @@ def main() -> None:
             print("Exiting...")
             break
 
-        print(f"Opening: {selected}")
-        open_or_display(selected, inline=args.inline, inline_preferred=args.inline_tool)
+        print(f"Opening: {selected.name}")
+        # Use inline by default unless --no-inline is specified
+        use_inline = not args.no_inline
+        open_or_display(selected, inline=use_inline, inline_preferred=args.inline_tool)
 
         try:
             cont = input("\nPress Enter to continue (or type 'q' to quit): ").strip()
