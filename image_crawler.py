@@ -18,14 +18,27 @@ from urllib.robotparser import RobotFileParser
 try:
     import requests
     from bs4 import BeautifulSoup
+    try:
+        from PIL import Image
+        PIL_AVAILABLE = True
+    except ImportError:
+        PIL_AVAILABLE = False
 except ImportError:
     print("Error: Required packages not installed.")
-    print("Install with: pip install requests beautifulsoup4")
+    print("Install with: pip install requests beautifulsoup4 pillow")
     sys.exit(1)
 
 
 class ImageCrawler:
-    def __init__(self, base_url: str, output_dir: str = "downloaded_images", delay: float = 1.0):
+    def __init__(
+        self,
+        base_url: str,
+        output_dir: str = "downloaded_images",
+        delay: float = 1.0,
+        min_size_kb: int = 10,
+        min_dimensions: tuple[int, int] = (100, 100),
+        no_duplicates: bool = False,
+    ):
         """
         Initialize the image crawler.
 
@@ -33,14 +46,28 @@ class ImageCrawler:
             base_url: Starting URL to crawl
             output_dir: Directory to save images
             delay: Delay between requests in seconds (be respectful!)
+            min_size_kb: Minimum file size in KB (default: 10KB)
+            min_dimensions: Minimum (width, height) in pixels (default: 100x100)
+            no_duplicates: Skip duplicate images in current session
         """
         self.base_url = base_url.rstrip("/")
         self.parsed_base = urlparse(self.base_url)
         self.output_dir = Path(output_dir)
         self.delay = delay
+        self.min_size_kb = min_size_kb
+        self.min_dimensions = min_dimensions
+        self.no_duplicates = no_duplicates
         self.visited_urls = set()
         self.downloaded_images = []
         self.failed_images = []
+        self.seen_image_hashes = set()  # For duplicate detection
+        self.skip_stats = {
+            "webp": 0,
+            "too_small_size": 0,
+            "too_small_dimensions": 0,
+            "duplicate": 0,
+            "already_exists": 0,
+        }
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -110,7 +137,7 @@ class ImageCrawler:
             return None
 
     def _find_images(self, html: str, page_url: str) -> list[str]:
-        """Extract all image URLs from HTML."""
+        """Extract all image URLs from HTML (excluding webp)."""
         soup = BeautifulSoup(html, "html.parser")
         image_urls = []
 
@@ -118,6 +145,9 @@ class ImageCrawler:
         for img in soup.find_all("img", src=True):
             src = img.get("src")
             if src:
+                # Skip webp
+                if src.lower().endswith(".webp") or ".webp" in src.lower():
+                    continue
                 absolute_url = urljoin(page_url, src)
                 image_urls.append(absolute_url)
 
@@ -129,6 +159,9 @@ class ImageCrawler:
                     # Parse srcset (can have multiple URLs with descriptors)
                     for item in srcset.split(","):
                         url_part = item.strip().split()[0]
+                        # Skip webp
+                        if url_part.lower().endswith(".webp") or ".webp" in url_part.lower():
+                            continue
                         absolute_url = urljoin(page_url, url_part)
                         image_urls.append(absolute_url)
 
@@ -136,7 +169,10 @@ class ImageCrawler:
         css_bg_pattern = r'url\(["\']?([^"\'()]+)["\']?\)'
         for match in re.finditer(css_bg_pattern, html):
             url = match.group(1)
-            if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"]):
+            # Skip webp
+            if url.lower().endswith(".webp") or ".webp" in url.lower():
+                continue
+            if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".svg"]):
                 absolute_url = urljoin(page_url, url)
                 image_urls.append(absolute_url)
 
@@ -159,12 +195,38 @@ class ImageCrawler:
 
         return list(set(links))
 
+    def _get_image_hash(self, filepath: Path) -> str:
+        """Get a simple hash of image file for duplicate detection."""
+        import hashlib
+        try:
+            with open(filepath, "rb") as f:
+                # Read first 64KB for hash (faster than full file)
+                data = f.read(65536)
+                return hashlib.md5(data).hexdigest()
+        except:
+            return ""
+
+    def _check_image_dimensions(self, filepath: Path) -> tuple[int, int] | None:
+        """Get image dimensions. Returns (width, height) or None if can't read."""
+        if not PIL_AVAILABLE:
+            return None
+        try:
+            with Image.open(filepath) as img:
+                return img.size  # (width, height)
+        except:
+            return None
+
     def _download_image(self, image_url: str) -> bool:
-        """Download a single image."""
+        """Download a single image with filtering."""
         try:
             # Get filename from URL
             parsed = urlparse(image_url)
             filename = os.path.basename(parsed.path)
+
+            # Skip webp files
+            if filename.lower().endswith(".webp") or ".webp" in image_url.lower():
+                self.skip_stats["webp"] += 1
+                return False
 
             # If no filename, generate one
             if not filename or "." not in filename:
@@ -173,12 +235,13 @@ class ImageCrawler:
                 try:
                     head = self.session.head(image_url, timeout=5)
                     content_type = head.headers.get("Content-Type", "")
+                    if "webp" in content_type:
+                        self.skip_stats["webp"] += 1
+                        return False
                     if "png" in content_type:
                         ext = ".png"
                     elif "gif" in content_type:
                         ext = ".gif"
-                    elif "webp" in content_type:
-                        ext = ".webp"
                 except:
                     pass
                 filename = f"image_{len(self.downloaded_images)}{ext}"
@@ -189,7 +252,7 @@ class ImageCrawler:
 
             # Skip if already exists
             if filepath.exists():
-                print(f"⊘ Skipping {filename} (already exists)")
+                self.skip_stats["already_exists"] += 1
                 return True
 
             # Download
@@ -197,18 +260,52 @@ class ImageCrawler:
             response = self.session.get(image_url, timeout=10, stream=True)
             response.raise_for_status()
 
-            # Save
-            with open(filepath, "wb") as f:
+            # Save to temp location first to check size/dimensions
+            temp_filepath = filepath.with_suffix(filepath.suffix + ".tmp")
+            with open(temp_filepath, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            size_kb = filepath.stat().st_size / 1024
-            print(f"✓ Downloaded: {filename} ({size_kb:.1f} KB)")
+            # Check file size
+            size_kb = temp_filepath.stat().st_size / 1024
+            if size_kb < self.min_size_kb:
+                temp_filepath.unlink()
+                self.skip_stats["too_small_size"] += 1
+                return False
+
+            # Check dimensions if PIL available
+            if PIL_AVAILABLE:
+                dimensions = self._check_image_dimensions(temp_filepath)
+                if dimensions:
+                    width, height = dimensions
+                    min_w, min_h = self.min_dimensions
+                    if width < min_w or height < min_h:
+                        temp_filepath.unlink()
+                        self.skip_stats["too_small_dimensions"] += 1
+                        return False
+
+            # Check for duplicates if enabled
+            if self.no_duplicates:
+                img_hash = self._get_image_hash(temp_filepath)
+                if img_hash and img_hash in self.seen_image_hashes:
+                    temp_filepath.unlink()
+                    self.skip_stats["duplicate"] += 1
+                    return False
+                self.seen_image_hashes.add(img_hash)
+
+            # Move temp file to final location
+            temp_filepath.rename(filepath)
+
             self.downloaded_images.append(image_url)
             return True
 
         except Exception as e:
-            print(f"✗ Failed to download {image_url}: {e}")
+            # Clean up temp file if it exists
+            try:
+                if 'temp_filepath' in locals() and temp_filepath.exists():
+                    temp_filepath.unlink()
+            except:
+                pass
             self.failed_images.append(image_url)
             return False
 
@@ -222,7 +319,9 @@ class ImageCrawler:
         """
         print(f"\n🕷️  Starting crawl of: {self.base_url}")
         print(f"📁 Output directory: {self.output_dir}")
-        print(f"⏱️  Delay between requests: {self.delay}s\n")
+        print(f"⏱️  Delay between requests: {self.delay}s")
+        print(f"📏 Min size: {self.min_size_kb}KB | Min dimensions: {self.min_dimensions[0]}x{self.min_dimensions[1]}px")
+        print(f"🚫 Filters: WebP ignored | Duplicates: {'ON' if self.no_duplicates else 'OFF'}\n")
 
         to_visit = [(self.base_url, 0)]  # (url, depth)
 
@@ -232,19 +331,24 @@ class ImageCrawler:
             if depth > max_depth:
                 continue
 
-            print(f"\n📄 Crawling: {current_url} (depth: {depth})")
+            print(f"📄 [{depth}] {current_url}")
             response = self._get_page(current_url)
             if not response:
                 continue
 
             # Extract and download images
             image_urls = self._find_images(response.text, current_url)
-            print(f"   Found {len(image_urls)} image(s)")
+            found_count = len(image_urls)
 
             for img_url in image_urls:
                 # Only download images from same domain or absolute URLs
                 if self._is_same_domain(img_url) or img_url.startswith("http"):
                     self._download_image(img_url)
+
+            # Show progress in table format
+            downloaded = len(self.downloaded_images)
+            skipped = sum(self.skip_stats.values())
+            print(f"   Found: {found_count} | Downloaded: {downloaded} | Skipped: {skipped}")
 
             # Find links for further crawling
             if depth < max_depth:
@@ -253,13 +357,43 @@ class ImageCrawler:
                     if link not in self.visited_urls and (link, depth + 1) not in to_visit:
                         to_visit.append((link, depth + 1))
 
-        # Summary
-        print(f"\n{'='*60}")
-        print(f"✅ Crawl complete!")
-        print(f"   Pages visited: {len(self.visited_urls)}")
-        print(f"   Images downloaded: {len(self.downloaded_images)}")
-        print(f"   Failed downloads: {len(self.failed_images)}")
-        print(f"   Output directory: {self.output_dir.absolute()}")
+        # Summary table
+        print(f"\n{'='*70}")
+        print(f"{'✅ CRAWL SUMMARY':^70}")
+        print(f"{'='*70}")
+        
+        # Create table rows
+        rows = [
+            ("Pages visited", f"{len(self.visited_urls)}"),
+            ("Images downloaded", f"{len(self.downloaded_images)}"),
+            ("Failed downloads", f"{len(self.failed_images)}"),
+        ]
+        
+        # Add skip stats if any
+        if sum(self.skip_stats.values()) > 0:
+            rows.append(("", ""))  # Separator
+            rows.append(("Skipped (reasons):", ""))
+            if self.skip_stats["webp"] > 0:
+                rows.append(("  • WebP files", f"{self.skip_stats['webp']}"))
+            if self.skip_stats["too_small_size"] > 0:
+                rows.append(("  • Too small (size)", f"{self.skip_stats['too_small_size']}"))
+            if self.skip_stats["too_small_dimensions"] > 0:
+                rows.append(("  • Too small (dimensions)", f"{self.skip_stats['too_small_dimensions']}"))
+            if self.skip_stats["duplicate"] > 0:
+                rows.append(("  • Duplicates", f"{self.skip_stats['duplicate']}"))
+            if self.skip_stats["already_exists"] > 0:
+                rows.append(("  • Already exists", f"{self.skip_stats['already_exists']}"))
+        
+        # Print table
+        max_label = max(len(row[0]) for row in rows if row[0])
+        for label, value in rows:
+            if label == "":
+                print()
+            else:
+                print(f"  {label:<{max_label}}  {value:>10}")
+        
+        print(f"{'='*70}")
+        print(f"📁 Output: {self.output_dir.absolute()}")
 
 
 def main():
@@ -299,6 +433,29 @@ Examples:
         default=2,
         help="Maximum crawl depth (default: 2)"
     )
+    parser.add_argument(
+        "--min-size",
+        type=int,
+        default=10,
+        help="Minimum file size in KB (default: 10)"
+    )
+    parser.add_argument(
+        "--min-width",
+        type=int,
+        default=100,
+        help="Minimum image width in pixels (default: 100)"
+    )
+    parser.add_argument(
+        "--min-height",
+        type=int,
+        default=100,
+        help="Minimum image height in pixels (default: 100)"
+    )
+    parser.add_argument(
+        "--no-duplicates",
+        action="store_true",
+        help="Skip duplicate images in current session (checks image content)"
+    )
 
     args = parser.parse_args()
 
@@ -307,7 +464,14 @@ Examples:
         print("Error: URL must start with http:// or https://")
         sys.exit(1)
 
-    crawler = ImageCrawler(args.url, args.output, args.delay)
+    crawler = ImageCrawler(
+        args.url,
+        args.output,
+        args.delay,
+        min_size_kb=args.min_size,
+        min_dimensions=(args.min_width, args.min_height),
+        no_duplicates=args.no_duplicates,
+    )
     crawler.crawl(args.max_pages, args.max_depth)
 
 

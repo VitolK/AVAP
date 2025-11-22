@@ -136,23 +136,71 @@ def pick_with_fzf(images: List[Path]) -> Optional[Path]:
 
 
 def fallback_menu(images: List[Path]) -> Optional[Path]:
-    """Simple numbered menu fallback."""
+    """Compact menu with max 50 images displayed."""
+    MAX_DISPLAY = 50
+    total_images = len(images)
+    
     while True:
-        print("\n=== Nimhirdykla ===")
-        print("0) 🎲 RANDOM IMAGE")
-        for idx, img in enumerate(images, start=1):
-            print(f"{idx}) {img.name}")
-        choice = input("Select number, 'r' for random, 'q' to quit: ").strip().lower()
+        print("\n" + "="*70)
+        print(f"📷 Nimhirdykla - {total_images} image(s) found")
+        print("="*70)
+        
+        if total_images > MAX_DISPLAY:
+            print(f"\n⚠️  Too many images ({total_images}). Showing first {MAX_DISPLAY}.")
+            print(f"Enter a number 1-{MAX_DISPLAY} or a range like '1-50' to view specific images.")
+            display_images = images[:MAX_DISPLAY]
+        else:
+            display_images = images
+        
+        # Display in compact 2-column format
+        print(f"\n{'0) 🎲 RANDOM IMAGE':<35} {'':<35}")
+        print("-" * 70)
+        
+        # Display images in 2 columns
+        for i in range(0, len(display_images), 2):
+            row_images = display_images[i:i+2]
+            if len(row_images) == 2:
+                idx1 = i + 1
+                idx2 = i + 2
+                name1 = display_images[i].name[:32]  # Truncate long names
+                name2 = display_images[i+1].name[:32]
+                print(f"{idx1:>3}) {name1:<32} {idx2:>3}) {name2:<32}")
+            else:
+                idx = i + 1
+                name = row_images[0].name[:32]
+                print(f"{idx:>3}) {name:<32}")
+        
+        if total_images > MAX_DISPLAY:
+            print(f"\n💡 Tip: Enter number 1-{MAX_DISPLAY} or range like '10-20'")
+        
+        choice = input("\nSelect number, 'r' for random, 'q' to quit: ").strip().lower()
 
         if choice in ("q", "quit", "exit"):
             return None
         if choice in ("r", "random", "0"):
             return get_random_image(images)
+        
+        # Handle range input (e.g., "1-10")
+        if "-" in choice:
+            try:
+                start, end = map(int, choice.split("-"))
+                if 1 <= start <= total_images and 1 <= end <= total_images and start <= end:
+                    # Return first image in range (or could show submenu)
+                    return images[start - 1]
+            except ValueError:
+                pass
+        
+        # Handle single number
         if choice.isdigit():
             idx = int(choice)
-            if 1 <= idx <= len(images):
-                return images[idx - 1]
-        print("Invalid selection. Try again.")
+            if 1 <= idx <= len(display_images):
+                return display_images[idx - 1]
+            elif idx > MAX_DISPLAY and idx <= total_images:
+                print(f"⚠️  Image #{idx} is beyond displayed range. Showing first {MAX_DISPLAY} only.")
+                print(f"💡 Use range input like '{idx}-{min(idx+10, total_images)}' to access higher numbers.")
+                continue
+        
+        print("❌ Invalid selection. Try again.")
 
 
 def get_random_image(images: List[Path]) -> Optional[Path]:
@@ -336,19 +384,11 @@ def main() -> None:
             print("Exiting...")
             break
 
-        print(f"Opening: {selected.name}")
+        print(f"📂 Opening: {selected.name}")
         # Use inline by default unless --no-inline is specified
         use_inline = not args.no_inline
         open_or_display(selected, inline=use_inline, inline_preferred=args.inline_tool)
-
-        try:
-            cont = input("\nPress Enter to continue (or type 'q' to quit): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nExiting...")
-            break
-        if cont.lower() == "q":
-            print("Exiting...")
-            break
+        # No need to press enter - loop continues automatically
 
 
 if __name__ == "__main__":
