@@ -1,0 +1,8 @@
+# Python Requirements
+
+# Image Crawler dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Note: Picture Viewer uses only standard library (no dependencies needed)
+
