@@ -1,9 +1,8 @@
-# Python Requirements
-
-# Image Crawler dependencies
-requests>=2.31.0
-beautifulsoup4>=4.12.0
 Pillow>=10.0.0
 
-# Note: Picture Viewer uses only standard library (no dependencies needed)
-
+# Note: tkinter is not installable via pip
+# On Linux/WSL, install it using your system package manager:
+#   Ubuntu/Debian: sudo apt-get install python3-tk
+#   Fedora/RHEL: sudo dnf install python3-tkinter
+#   Arch: sudo pacman -S tk
+# On Windows/macOS, tkinter is usually included with Python
