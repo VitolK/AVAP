@@ -17,12 +17,11 @@ from datetime import datetime
 
 
 class CollageViewer:
-    def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5):
+    def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5, fullscreen=False):
         self.root = root
         self.directory = Path(directory)
-        self.canvas_width = canvas_width
-        self.canvas_height = canvas_height
         self.interval = interval  # seconds between new images
+        self.fullscreen = fullscreen
         
         # Supported image extensions
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', 
@@ -43,9 +42,34 @@ class CollageViewer:
         self.output_dir = Path("koliazai")
         self.output_dir.mkdir(exist_ok=True)
         
-        # Set window size to canvas size
+        # Set window size and fullscreen mode
         self.root.title("")
-        self.root.geometry(f"{canvas_width}x{canvas_height}")
+        if fullscreen:
+            # Get screen dimensions first
+            self.root.update_idletasks()
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            self.canvas_width = screen_width
+            self.canvas_height = screen_height
+            
+            # Set fullscreen - this works on both Linux and Windows
+            # On Linux, fullscreen typically removes borders automatically
+            # On Windows, we may need overrideredirect, but try fullscreen first
+            self.root.attributes('-fullscreen', True)
+            self.root.update_idletasks()
+            
+            # On Windows, also remove decorations for true borderless
+            # On Linux, this can cause X11 errors, so we skip it
+            import platform
+            if platform.system() == 'Windows':
+                try:
+                    self.root.overrideredirect(True)
+                except:
+                    pass
+        else:
+            self.canvas_width = canvas_width
+            self.canvas_height = canvas_height
+            self.root.geometry(f"{canvas_width}x{canvas_height}")
         
         # Create UI
         self.create_widgets()
@@ -263,6 +287,7 @@ Examples:
   %(prog)s -d downloaded_images
   %(prog)s -d /path/to/images -w 1920 -h 1080 -i 3
   %(prog)s --directory images --width 2560 --height 1440 --interval 10
+  %(prog)s -d images --fullscreen
         """
     )
     
@@ -292,6 +317,12 @@ Examples:
         type=float,
         default=5.0,
         help='Interval in seconds between adding new images (default: 5.0)'
+    )
+    
+    parser.add_argument(
+        '--fullscreen',
+        action='store_true',
+        help='Run in fullscreen mode (no borders, no title bar, takes over entire screen)'
     )
     
     return parser.parse_args()
@@ -326,7 +357,8 @@ def main():
         directory=args.directory,
         canvas_width=args.width,
         canvas_height=args.height,
-        interval=args.interval
+        interval=args.interval,
+        fullscreen=args.fullscreen
     )
     
     root.mainloop()
