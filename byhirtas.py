@@ -44,7 +44,7 @@ class CollageViewer:
         self.output_dir.mkdir(exist_ok=True)
         
         # Set window size to canvas size
-        self.root.title("Užmojis")
+        self.root.title("")
         self.root.geometry(f"{canvas_width}x{canvas_height}")
         
         # Create UI
@@ -151,6 +151,15 @@ class CollageViewer:
     def save_collage(self):
         """Save the current collage as an image file and replace canvas with it."""
         try:
+            # Delete all previous collage files
+            if self.output_dir.exists():
+                for old_file in self.output_dir.glob("collage_*.png"):
+                    try:
+                        old_file.unlink()
+                        print(f"Deleted old collage: {old_file.name}")
+                    except Exception as e:
+                        print(f"Error deleting old collage {old_file.name}: {e}")
+            
             # Create a new image with the canvas dimensions
             collage = Image.new('RGB', (self.canvas_width, self.canvas_height), 'white')
             
@@ -234,7 +243,7 @@ class CollageViewer:
             self.total_images_count += 1
             
             # Update window title with count
-            self.root.title(f"Užmojis - {self.total_images_count} nuotraukų")
+            #self.root.title(f"Užmojis - {self.total_images_count} nuotraukų")
             
             # Save collage every 30 images (based on total count)
             if self.total_images_count % 30 == 0:
