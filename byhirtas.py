@@ -17,11 +17,15 @@ from datetime import datetime
 
 
 class CollageViewer:
-    def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5, fullscreen=False):
+    def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5, fullscreen=False,
+                 rotate=False, mirror=False, crop=False):
         self.root = root
         self.directory = Path(directory)
         self.interval = interval  # seconds between new images
         self.fullscreen = fullscreen
+        self.rotate = rotate
+        self.mirror = mirror
+        self.crop = crop
         
         # Supported image extensions
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', 
@@ -132,8 +136,30 @@ class CollageViewer:
         try:
             # Open image
             img = Image.open(image_path)
+            
+            # Apply random crop (before other transformations)
+            if self.crop:
+                w, h = img.size
+                crop_percent = random.uniform(0.1, 1.0)
+                new_w = max(int(w * crop_percent), 1)
+                new_h = max(int(h * crop_percent), 1)
+                x = random.randint(0, w - new_w)
+                y = random.randint(0, h - new_h)
+                img = img.crop((x, y, x + new_w, y + new_h))
+            
+            # Apply random rotation at 90 degree intervals
+            if self.rotate:
+                angle = random.choice([0, 90, 180, 270])
+                if angle != 0:
+                    img = img.rotate(angle, expand=True)
+            
+            # Apply random mirror (50% chance)
+            if self.mirror:
+                if random.random() < 0.5:
+                    img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            
             img_width, img_height = img.size
-            original_img = img.copy()  # Keep original for saving
+            original_img = img.copy()  # Keep transformed version for saving
             
             # Convert to PhotoImage (keep original size or scale if too large)
             # Optionally scale down if image is extremely large
@@ -288,6 +314,7 @@ Examples:
   %(prog)s -d /path/to/images -w 1920 -h 1080 -i 3
   %(prog)s --directory images --width 2560 --height 1440 --interval 10
   %(prog)s -d images --fullscreen
+  %(prog)s -d images --rotate --mirror --crop
         """
     )
     
@@ -325,6 +352,24 @@ Examples:
         help='Run in fullscreen mode (no borders, no title bar, takes over entire screen)'
     )
     
+    parser.add_argument(
+        '--rotate',
+        action='store_true',
+        help='Rotate images at random 90 degree intervals (0, 90, 180, 270 degrees)'
+    )
+    
+    parser.add_argument(
+        '--mirror',
+        action='store_true',
+        help='Mirror images horizontally with 50%% chance'
+    )
+    
+    parser.add_argument(
+        '--crop',
+        action='store_true',
+        help='Randomly crop images (between 10%% and 100%% of original size)'
+    )
+    
     return parser.parse_args()
 
 
@@ -358,7 +403,10 @@ def main():
         canvas_width=args.width,
         canvas_height=args.height,
         interval=args.interval,
-        fullscreen=args.fullscreen
+        fullscreen=args.fullscreen,
+        rotate=args.rotate,
+        mirror=args.mirror,
+        crop=args.crop
     )
     
     root.mainloop()
