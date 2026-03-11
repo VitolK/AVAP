@@ -123,7 +123,8 @@ class CollageViewer:
             inner = s
         # Normalize separators (spaces and commas)
         tokens = [t.strip() for t in inner.replace(',', ' ').split() if t.strip()]
-        allowed = {'divide', 'subtract', 'exclusion'}
+        # Supported blend modes, including 'normal' (no special math)
+        allowed = {'divide', 'subtract', 'exclusion', 'normal'}
         modes = [t for t in tokens if t in allowed]
         # Fallback for simple single mode string
         if not modes and s in allowed:
@@ -146,7 +147,10 @@ class CollageViewer:
         base = np.array(base_img.convert('RGB')).astype(float)
         blend = np.array(blend_img.convert('RGB')).astype(float)
         
-        if mode == 'divide':
+        if mode == 'normal':
+            # Normal: no special blend math, just use the blend image
+            result = blend
+        elif mode == 'divide':
             # Divide: (base / blend) * 255, avoiding division by zero
             # Lightens the base where blend is dark
             result = np.clip((base * 255) / (blend + 1), 0, 255)
@@ -515,7 +519,7 @@ Examples:
     parser.add_argument(
         '--blend',
         type=str,
-        help='Blend mode(s) for compositing images (like Photoshop). Single value (exclusion) or list like "[exclusion,subtract,divide]"'
+        help='Blend mode(s) for compositing images (like Photoshop). Single value (exclusion) or list like "[exclusion,subtract,divide,normal]". "normal" leaves the image unaltered by blend math.'
     )
     
     return parser.parse_args()
