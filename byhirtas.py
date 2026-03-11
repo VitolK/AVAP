@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox
 from pathlib import Path
 from PIL import Image, ImageTk
+import numpy as np
 import sys
 import os
 import argparse
@@ -18,7 +19,7 @@ from datetime import datetime
 
 class CollageViewer:
     def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5, fullscreen=False,
-                 rotate=False, mirror=False, crop=False):
+                 rotate=False, mirror=False, crop=False, effects=None, opacity='1.0', blend=None):
         self.root = root
         self.directory = Path(directory)
         self.interval = interval  # seconds between new images
@@ -26,6 +27,14 @@ class CollageViewer:
         self.rotate = rotate
         self.mirror = mirror
         self.crop = crop
+        self.effects = effects or []
+        # Raw blend string from CLI; parsed into modes list below
+        self.blend = blend
+        
+        # Parse opacity (can be single value or range like "[0.25-0.7]")
+        self.opacity_range = self._parse_opacity(opacity)
+        # Parse blend modes (can be single value or list like "[exclusion,subtract]")
+        self.blend_modes = self._parse_blend_modes(blend)
         
         # Supported image extensions
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', 
@@ -39,6 +48,8 @@ class CollageViewer:
         # Store the background collage image (if loaded)
         self.background_collage = None
         self.background_collage_photo = None
+        # Live collage used for on-the-fly compositing (shown in Tk)
+        self.live_collage = None
         # Track total images added (including those in background collage)
         self.total_images_count = 0
         
@@ -86,6 +97,77 @@ class CollageViewer:
         
         # Start the collage timer
         self.add_next_image()
+    
+    def _parse_opacity(self, opacity_str):
+        """Parse opacity string. Returns (min, max) tuple."""
+        opacity_str = opacity_str.strip()
+        if opacity_str.startswith('[') and opacity_str.endswith(']'):
+            # Range format: [min-max]
+            inner = opacity_str[1:-1]
+            parts = inner.split('-')
+            if len(parts) == 2:
+                return (float(parts[0]), float(parts[1]))
+        # Single value
+        val = float(opacity_str)
+        return (val, val)
+
+    def _parse_blend_modes(self, blend_str):
+        """Parse blend string into a list of modes."""
+        if not blend_str:
+            return []
+        s = blend_str.strip()
+        # Accept formats like "[exclusion,subtract]" or "[ exclusion subtract divide ]"
+        if s.startswith('[') and s.endswith(']'):
+            inner = s[1:-1]
+        else:
+            inner = s
+        # Normalize separators (spaces and commas)
+        tokens = [t.strip() for t in inner.replace(',', ' ').split() if t.strip()]
+        allowed = {'divide', 'subtract', 'exclusion'}
+        modes = [t for t in tokens if t in allowed]
+        # Fallback for simple single mode string
+        if not modes and s in allowed:
+            return [s]
+        return modes
+    
+    def _get_opacity(self):
+        """Get opacity value (random if range was specified)."""
+        min_op, max_op = self.opacity_range
+        if min_op == max_op:
+            return min_op
+        return random.uniform(min_op, max_op)
+    
+    def _apply_blend_mode(self, base_img, blend_img, mode, opacity=1.0):
+        """Apply Photoshop-style blend mode between two images with opacity."""
+        # Ensure both images are the same size and mode
+        if base_img.size != blend_img.size:
+            return blend_img
+        
+        base = np.array(base_img.convert('RGB')).astype(float)
+        blend = np.array(blend_img.convert('RGB')).astype(float)
+        
+        if mode == 'divide':
+            # Divide: (base / blend) * 255, avoiding division by zero
+            # Lightens the base where blend is dark
+            result = np.clip((base * 255) / (blend + 1), 0, 255)
+        
+        elif mode == 'subtract':
+            # Subtract: base - blend
+            result = np.clip(base - blend, 0, 255)
+        
+        elif mode == 'exclusion':
+            # Exclusion: base + blend - 2 * base * blend / 255
+            result = np.clip(base + blend - (2 * base * blend / 255), 0, 255)
+        
+        else:
+            result = blend
+        
+        # Apply opacity: interpolate between base and blended result
+        if opacity < 1.0:
+            result = base * (1 - opacity) + result * opacity
+            result = np.clip(result, 0, 255)
+        
+        return Image.fromarray(result.astype(np.uint8), 'RGB')
     
     def create_widgets(self):
         # Canvas for displaying images (no scrollbars needed, fixed size)
@@ -136,6 +218,7 @@ class CollageViewer:
         try:
             # Open image
             img = Image.open(image_path)
+            # Debug: print(f"Loading: {image_path.name}, effects={self.effects}, blend={self.blend}, opacity_range={self.opacity_range}")
             
             # Apply random crop (before other transformations)
             if self.crop:
@@ -158,10 +241,28 @@ class CollageViewer:
                 if random.random() < 0.5:
                     img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             
+            # Apply effects
+            for effect in self.effects:
+                # Debug: print(f"  Applying effect: {effect}")
+                if effect == 'grayscale':
+                    img = img.convert('L').convert('RGB')
+            
+            # Get opacity for this image
+            current_opacity = self._get_opacity()
+            # Debug: print(f"  Opacity: {current_opacity}, blend modes: {self.blend_modes}")
+            
+            # Apply opacity to alpha channel (for non-blend-mode transparency)
+            if current_opacity < 1.0 and not self.blend_modes:
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                # Modify the alpha channel based on opacity
+                r, g, b, a = img.split()
+                a = a.point(lambda x: int(x * current_opacity))
+                img = Image.merge('RGBA', (r, g, b, a))
+            
             img_width, img_height = img.size
             original_img = img.copy()  # Keep transformed version for saving
             
-            # Convert to PhotoImage (keep original size or scale if too large)
             # Optionally scale down if image is extremely large
             max_size = max(self.canvas_width, self.canvas_height) * 2
             if img_width > max_size or img_height > max_size:
@@ -170,30 +271,70 @@ class CollageViewer:
                 new_height = int(img_height * scale)
                 img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
                 img_width, img_height = new_width, new_height
+                original_img = img.copy()
             
-            photo = ImageTk.PhotoImage(img)
+            # Initialize live_collage if needed
+            if self.live_collage is None:
+                if self.background_collage is not None:
+                    self.live_collage = self.background_collage.copy()
+                else:
+                    self.live_collage = Image.new('RGB', (self.canvas_width, self.canvas_height), 'white')
             
             # Random position (center is 0,0, so we place relative to center)
-            # Position is the top-left corner of the image
             center_x = self.canvas_width // 2
             center_y = self.canvas_height // 2
-            
-            # Random offset from center (can go outside canvas)
             offset_x = random.randint(-self.canvas_width, self.canvas_width)
             offset_y = random.randint(-self.canvas_height, self.canvas_height)
-            
-            # Calculate position (anchor is center for create_image)
             x = center_x + offset_x
             y = center_y + offset_y
-            
-            # Store the image and its position (including original PIL image for saving)
-            self.displayed_images.append((photo, x, y, image_path, img, img_width, img_height))
-            
-            # Draw the image on canvas (on top of background if exists)
-            self.canvas.create_image(x, y, image=photo, anchor=tk.CENTER)
-            
-            # Keep reference to prevent garbage collection
-            # (PhotoImage objects need to be kept alive)
+            paste_x = x - img_width // 2
+            paste_y = y - img_height // 2
+
+            # Composite onto live_collage
+            if self.blend_modes:
+                mode = random.choice(self.blend_modes)
+                # Two-layer model: current background vs current image region
+                src_x1 = max(0, paste_x)
+                src_y1 = max(0, paste_y)
+                src_x2 = min(self.canvas_width, paste_x + img_width)
+                src_y2 = min(self.canvas_height, paste_y + img_height)
+
+                if src_x2 > src_x1 and src_y2 > src_y1:
+                    base_region = self.live_collage.crop((src_x1, src_y1, src_x2, src_y2))
+
+                    img_x1 = src_x1 - paste_x
+                    img_y1 = src_y1 - paste_y
+                    img_x2 = img_x1 + (src_x2 - src_x1)
+                    img_y2 = img_y1 + (src_y2 - src_y1)
+
+                    blend_img = img.convert('RGB') if img.mode != 'RGB' else img
+                    blend_region = blend_img.crop((img_x1, img_y1, img_x2, img_y2))
+
+                    blended = self._apply_blend_mode(base_region, blend_region, mode, current_opacity)
+                    self.live_collage.paste(blended, (src_x1, src_y1))
+            else:
+                # Normal compositing with alpha/opacity
+                if img.mode == 'RGBA':
+                    base_rgba = self.live_collage.convert('RGBA')
+                    layer = Image.new('RGBA', base_rgba.size, (0, 0, 0, 0))
+                    layer.paste(img, (paste_x, paste_y))
+                    self.live_collage = Image.alpha_composite(base_rgba, layer).convert('RGB')
+                else:
+                    self.live_collage.paste(img, (paste_x, paste_y))
+
+            # Update background_collage and Tk canvas from live_collage
+            self.background_collage = self.live_collage.copy()
+            self.background_collage_photo = ImageTk.PhotoImage(self.live_collage)
+            self.canvas.delete("all")
+            self.canvas.create_image(
+                self.canvas_width // 2,
+                self.canvas_height // 2,
+                image=self.background_collage_photo,
+                anchor=tk.CENTER,
+            )
+
+            # Optionally track metadata (not used for compositing anymore)
+            self.displayed_images.append((None, x, y, image_path, original_img, img_width, img_height, current_opacity))
             
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
@@ -210,30 +351,13 @@ class CollageViewer:
                     except Exception as e:
                         print(f"Error deleting old collage {old_file.name}: {e}")
             
-            # Create a new image with the canvas dimensions
-            collage = Image.new('RGB', (self.canvas_width, self.canvas_height), 'white')
-            
-            # If there's a background collage, paste it first
-            if self.background_collage:
-                collage.paste(self.background_collage, (0, 0))
-            
-            # Paste each individual image at its position
-            for photo, x, y, image_path, img, img_width, img_height in self.displayed_images:
-                # Calculate top-left corner (since anchor is center)
-                paste_x = x - img_width // 2
-                paste_y = y - img_height // 2
-                
-                if img.mode == 'RGBA':
-                    # Create a white background for transparent images
-                    bg = Image.new('RGB', img.size, 'white')
-                    bg.paste(img, mask=img.split()[3] if len(img.split()) == 4 else None)
-                    img_to_paste = bg
-                elif img.mode != 'RGB':
-                    img_to_paste = img.convert('RGB')
-                else:
-                    img_to_paste = img
-                
-                collage.paste(img_to_paste, (paste_x, paste_y))
+            # Use the current live_collage (what you see in Tk) as the saved collage
+            if self.live_collage is not None:
+                collage = self.live_collage.copy()
+            elif self.background_collage is not None:
+                collage = self.background_collage.copy()
+            else:
+                collage = Image.new('RGB', (self.canvas_width, self.canvas_height), 'white')
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"collage_{timestamp}_{self.total_images_count}images.png"
@@ -260,6 +384,7 @@ class CollageViewer:
             # Convert to PhotoImage
             self.background_collage_photo = ImageTk.PhotoImage(collage_img)
             self.background_collage = collage_img.copy()
+            self.live_collage = collage_img.copy()
             
             # Clear the canvas
             self.canvas.delete("all")
@@ -315,6 +440,8 @@ Examples:
   %(prog)s --directory images --width 2560 --height 1440 --interval 10
   %(prog)s -d images --fullscreen
   %(prog)s -d images --rotate --mirror --crop
+  %(prog)s -d images --effect grayscale --opacity 0.5
+  %(prog)s -d images --opacity "[0.25-0.7]" --blend exclusion
         """
     )
     
@@ -370,6 +497,27 @@ Examples:
         help='Randomly crop images (between 10%% and 100%% of original size)'
     )
     
+    parser.add_argument(
+        '--effect',
+        type=str,
+        action='append',
+        choices=['grayscale'],
+        help='Apply effect to images (can be specified multiple times). Available: grayscale'
+    )
+    
+    parser.add_argument(
+        '--opacity',
+        type=str,
+        default='1.0',
+        help='Set opacity for each image. Single value (0.0-1.0) or range like "[0.25-0.7]" for random'
+    )
+    
+    parser.add_argument(
+        '--blend',
+        type=str,
+        help='Blend mode(s) for compositing images (like Photoshop). Single value (exclusion) or list like "[exclusion,subtract,divide]"'
+    )
+    
     return parser.parse_args()
 
 
@@ -396,6 +544,25 @@ def main():
         print("Error: Interval must be positive")
         sys.exit(1)
     
+    # Validate opacity
+    try:
+        opacity_str = args.opacity.strip()
+        if opacity_str.startswith('[') and opacity_str.endswith(']'):
+            inner = opacity_str[1:-1]
+            parts = inner.split('-')
+            if len(parts) != 2:
+                raise ValueError("Range format should be [min-max]")
+            min_op, max_op = float(parts[0]), float(parts[1])
+            if min_op < 0.0 or max_op > 1.0 or min_op > max_op:
+                raise ValueError("Opacity range must be between 0.0 and 1.0")
+        else:
+            val = float(opacity_str)
+            if val < 0.0 or val > 1.0:
+                raise ValueError("Opacity must be between 0.0 and 1.0")
+    except ValueError as e:
+        print(f"Error: Invalid opacity value - {e}")
+        sys.exit(1)
+    
     root = tk.Tk()
     app = CollageViewer(
         root, 
@@ -406,7 +573,10 @@ def main():
         fullscreen=args.fullscreen,
         rotate=args.rotate,
         mirror=args.mirror,
-        crop=args.crop
+        crop=args.crop,
+        effects=args.effect,
+        opacity=args.opacity,
+        blend=args.blend
     )
     
     root.mainloop()
