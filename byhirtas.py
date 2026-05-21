@@ -19,11 +19,16 @@ from datetime import datetime
 
 class CollageViewer:
     def __init__(self, root, directory, canvas_width=1920, canvas_height=1080, interval=5, fullscreen=False,
-                 rotate=False, mirror=False, crop=False, effects=None, opacity='1.0', blend=None):
+                 rotate=False, mirror=False, crop=False, effects=None, opacity='1.0', blend=None,
+                 auto_delete=False, save_collage=False, save_collage_interval=50):
         self.root = root
         self.directory = Path(directory)
         self.interval = interval  # seconds between new images
         self.fullscreen = fullscreen
+        self.auto_delete = auto_delete
+        self.save_collage = save_collage
+        self.save_collage_interval = save_collage_interval
+        self.last_displayed_image_path = None
         self.rotate = rotate
         self.mirror = mirror
         self.crop = crop
@@ -342,6 +347,18 @@ class CollageViewer:
             
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
+
+    def delete_last_displayed_image(self):
+        """Delete the source file of the previously displayed image."""
+        if not self.auto_delete or self.last_displayed_image_path is None:
+            return
+        path = self.last_displayed_image_path
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                print(f"Deleted image: {path.name}")
+        except Exception as e:
+            print(f"Error deleting image {path}: {e}")
     
     def save_collage(self):
         """Save the current collage as an image file and replace canvas with it."""
@@ -417,15 +434,20 @@ class CollageViewer:
         image_path = self.get_unused_image()
         
         if image_path:
+            self.delete_last_displayed_image()
             self.load_and_place_image(image_path)
+            self.last_displayed_image_path = image_path
             # Update total count
             self.total_images_count += 1
             
             # Update window title with count
             #self.root.title(f"Užmojis - {self.total_images_count} nuotraukų")
             
-            # Save collage every 30 images (based on total count)
-            if self.total_images_count % 30 == 0:
+            if (
+                self.save_collage
+                and self.save_collage_interval > 0
+                and self.total_images_count % self.save_collage_interval == 0
+            ):
                 self.save_collage()
         
         # Schedule next image addition
@@ -446,6 +468,7 @@ Examples:
   %(prog)s -d images --rotate --mirror --crop
   %(prog)s -d images --effect grayscale --opacity 0.5
   %(prog)s -d images --opacity "[0.25-0.7]" --blend exclusion
+  %(prog)s -d images --auto-delete --save-collage
         """
     )
     
@@ -481,6 +504,18 @@ Examples:
         '--fullscreen',
         action='store_true',
         help='Run in fullscreen mode (no borders, no title bar, takes over entire screen)'
+    )
+
+    parser.add_argument(
+        '--auto-delete',
+        action='store_true',
+        help='Delete the source file of the previously displayed image when a new one is shown'
+    )
+
+    parser.add_argument(
+        '--save-collage',
+        action='store_true',
+        help='Save the current collage to the koliazai folder every 50 images'
     )
     
     parser.add_argument(
@@ -580,7 +615,9 @@ def main():
         crop=args.crop,
         effects=args.effect,
         opacity=args.opacity,
-        blend=args.blend
+        blend=args.blend,
+        auto_delete=args.auto_delete,
+        save_collage=args.save_collage,
     )
     
     root.mainloop()
